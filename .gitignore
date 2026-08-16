@@ -30,6 +30,8 @@ Thumbs.db
 
 # Локальные данные приёмной кампании (не публиковать)
 *.csv
+*.xlsx
+*.xls
 data/raw/*
 !data/raw/.gitkeep
 !data/raw/README.md
@@ -37,5 +39,8 @@ data/raw/*
 # Локальные конфиги с числами мест и отчёты
 seats.yaml
 report.md
+report_*.md
 report.html
 *.log
+downloads/
+data/raw/_match_report.txt
