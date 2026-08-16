@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+.env.*
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Локальные данные приёмной кампании (не публиковать)
+*.csv
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/README.md
+
+# Локальные конфиги с числами мест и отчёты
+seats.yaml
+report.md
+report.html
+*.log

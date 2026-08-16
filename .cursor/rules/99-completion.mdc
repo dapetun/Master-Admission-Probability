@@ -1,0 +1,18 @@
+---
+description: Definition of Done
+alwaysApply: true
+---
+
+Before finishing:
+
+Review your implementation.
+
+Ensure:
+
+- requested functionality works
+- no obvious bugs remain
+- documentation is consistent
+
+If improvements are obvious:
+
+Implement them before finishing.

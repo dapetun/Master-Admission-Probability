@@ -1,0 +1,27 @@
+---
+description: Python standards
+globs:
+  - "**/*.py"
+---
+
+Use Python 3.12+.
+
+Always use:
+
+- type hints for functions
+- concise docstrings
+- f-strings
+- pathlib
+
+Prefer:
+
+- composition
+- early return
+- descriptive names
+
+Avoid:
+
+- global mutable state
+- deep nesting
+- magic numbers
+- duplicated code

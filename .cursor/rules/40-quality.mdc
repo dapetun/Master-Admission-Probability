@@ -1,0 +1,20 @@
+---
+description: Code quality
+alwaysApply: true
+---
+
+Priority:
+
+1. Correctness
+2. Readability
+3. Maintainability
+4. Performance
+
+Always remove:
+
+- unused imports
+- dead code
+
+Fix safe code smells automatically.
+
+Ask before risky refactoring.

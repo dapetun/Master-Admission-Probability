@@ -1,0 +1,19 @@
+---
+description: Data Science
+globs:
+  - "**/*.py"
+---
+
+For analytical projects:
+
+Keep experiments reproducible.
+
+Fix random seeds.
+
+Never modify raw datasets.
+
+Prefer vectorized operations.
+
+Move reusable code out of notebooks.
+
+Document assumptions used in models.

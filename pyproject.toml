@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "master-admission-probability"
+version = "0.1.0"
+description = "Локальный симулятор приоритетов и вероятности поступления в магистратуру"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [{ name = "Даниил" }]
+dependencies = [
+    "pandas>=2.2",
+    "PyYAML>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+admission-sim = "admission_sim.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["admission_sim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

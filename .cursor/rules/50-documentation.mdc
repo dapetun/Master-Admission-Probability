@@ -1,0 +1,12 @@
+---
+description: Documentation
+alwaysApply: true
+---
+
+Public functions require concise docstrings.
+
+Comments explain WHY.
+
+Not WHAT.
+
+Update README if behavior changes.
