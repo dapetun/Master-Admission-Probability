@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
 OUT = ROOT / "seats.yaml"
 
-# Известные КЦП вне сводки (уточняйте по официальным карточкам программ).
+# Известное число мест вне сводки (уточняйте по официальным карточкам программ).
 KNOWN_OVERRIDES: dict[str, int] = {}
 
 
@@ -65,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
             notes = f"из сводки {args.summary.name}" if args.summary else "из сводки"
         else:
             seats = None
-            notes = "КЦП неизвестны — в модели программа поглощает как EXTERNAL"
+            notes = (
+                "число мест неизвестно — модель считает уход вне загруженных программ"
+            )
 
         programs[key] = {
             "seats": seats,

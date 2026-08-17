@@ -3,23 +3,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 .venv/
 venv/
 env/
 .env
 .env.*
 *.egg-info/
-.eggs/
 dist/
 build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
 
 # IDE / OS
 .cursor/
@@ -43,5 +37,3 @@ report.md
 report_*.md
 report.html
 *.log
-downloads/
-data/raw/_match_report.txt

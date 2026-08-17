@@ -11,6 +11,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from admission_sim import __version__
 from admission_sim.pipeline import run_analysis
 from admission_sim.report import build_markdown_report, print_cli_report, write_markdown_report
+from admission_sim.scenarios import DEFAULT_THREATS_PER_PROGRAM
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,7 +44,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--monte-carlo",
         type=int,
         default=None,
-        help="Число прогонов Monte Carlo (по умолчанию в интерактиве: 500)",
+        help="Число случайных прогонов (по умолчанию в интерактиве: 1000). "
+        "Много раз случайно решаем, кто из неопределившихся подаст согласие",
+    )
+    parser.add_argument(
+        "--mc-workers",
+        type=int,
+        default=None,
+        help="Число процессов для случайных прогонов "
+        "(по умолчанию min(4, число ядер CPU))",
+    )
+    parser.add_argument(
+        "--focus-program",
+        type=str,
+        default=None,
+        help=(
+            "Считать случайные прогоны для одной программы "
+            "(точное имя или подстрока, например "
+            "«Прикладные модели искусственного интеллекта (Москва)»). "
+            "Быстрее: не считаем все конкурсы, но оставляем те, "
+            "куда конкуренты могут уйти по более высокому приоритету"
+        ),
     )
     parser.add_argument(
         "--campus",
@@ -55,34 +76,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--scenario",
         choices=["auto", "balanced", "optimistic", "pessimistic"],
         default="auto",
-        help="Сценарий согласий прочих (по умолчанию auto)",
+        help=(
+            "Сценарий согласий прочих (по умолчанию auto = доли из списков, не 100%%). "
+            "«Согласие подадут все» — отдельный крайний случай, не случайные прогоны"
+        ),
     )
     parser.add_argument(
         "--consent-p",
         type=float,
         default=None,
-        help="Ручной override P(согласие); игнорирует --scenario",
+        help="Вручную задать вероятность согласия у прочих (вместо --scenario)",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Seed для Monte Carlo",
+        help="Зерно генератора для случайных прогонов",
     )
     parser.add_argument(
         "--include-pending",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Учитывать pending («Ожидание результатов ВИ»). "
-            "По умолчанию включено; отключить: --no-include-pending"
+            "Учитывать заявки со статусом «ожидание результатов вступительных "
+            "испытаний». По умолчанию включено; отключить: --no-include-pending"
         ),
     )
     parser.add_argument(
         "--threats",
         type=int,
-        default=30,
-        help="Сколько контрфактов-угроз показать",
+        default=DEFAULT_THREATS_PER_PROGRAM,
+        help=(
+            "Максимум строк на каждую вашу программу "
+            "(выше вас без согласия, с наибольшим разрывом по месту). "
+            "По умолчанию без лимита"
+        ),
     )
     parser.add_argument(
         "--report",
@@ -140,13 +168,13 @@ def _interactive_params(args: argparse.Namespace, console: Console) -> argparse.
         console.print("[red]Код должен быть положительным числом[/red]")
 
     if args.monte_carlo is None:
-        if Confirm.ask("Запустить Monte Carlo?", default=True):
-            args.monte_carlo = IntPrompt.ask("Число прогонов", default=500)
+        if Confirm.ask("Запустить случайные прогоны?", default=True):
+            args.monte_carlo = IntPrompt.ask("Число прогонов", default=1000)
         else:
             args.monte_carlo = 0
 
     args.include_pending = Confirm.ask(
-        "Учитывать «Ожидание результатов ВИ» / pending?",
+        "Учитывать ожидание результатов вступительных испытаний?",
         default=args.include_pending,
     )
     return args
@@ -157,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     console = Console(stderr=True)
     console.print(
         "[dim]Дисклеймер: неофициальный локальный симулятор. "
-        "Не расчёт ПК/вуза/Госуслуг, не гарантия зачисления. "
+        "Не расчёт приёмной комиссии, вуза или Госуслуг, не гарантия зачисления. "
         "Лицензия: MIT.[/dim]\n"
     )
 
@@ -183,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
             consent_p=args.consent_p,
             seed=args.seed,
             threats=args.threats,
+            mc_workers=args.mc_workers,
+            focus_program=args.focus_program,
         )
     except FileNotFoundError as exc:
         console.print(f"[red]Ошибка загрузки:[/red] {exc}")
@@ -206,13 +236,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     if my_unknown:
         console.print(
-            "[yellow]Без КЦП у ваших программ:[/yellow] "
+            "[yellow]Нет числа бюджетных мест у ваших программ:[/yellow] "
             + ", ".join(my_unknown)
-            + " — поглощаются как EXTERNAL."
+            + " — модель считает уход вне загруженных программ."
         )
     elif other_unknown:
         console.print(
-            f"[dim]Без КЦП у прочих конкурсов: {other_unknown} "
+            f"[dim]Нет числа бюджетных мест у прочих конкурсов: {other_unknown} "
             "(на ваш паспорт не влияет напрямую).[/dim]"
         )
 

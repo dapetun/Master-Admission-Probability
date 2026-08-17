@@ -279,13 +279,14 @@ def _finalize_profile(profile: ApplicantProfile) -> None:
     priorities = [app.priority for app in profile.applications if app.priority < 10**6]
     if not priorities:
         profile.missing_higher_priority = False
-        return
-    profile.missing_higher_priority = min(priorities) > 1
-    sorted_pri = sorted(set(priorities))
-    for left, right in zip(sorted_pri, sorted_pri[1:]):
-        if right - left > 1:
-            profile.missing_higher_priority = True
-            return
+    else:
+        profile.missing_higher_priority = min(priorities) > 1
+        sorted_pri = sorted(set(priorities))
+        for left, right in zip(sorted_pri, sorted_pri[1:]):
+            if right - left > 1:
+                profile.missing_higher_priority = True
+                break
+    profile.rebuild_index()
 
 
 def build_profiles(rows: list[ApplicationRow]) -> dict[int, ApplicantProfile]:
@@ -315,6 +316,21 @@ def _status_allowed(status: str, allowed: frozenset[str] | set[str]) -> bool:
     return any(part.strip() in allowed for part in text.split("/"))
 
 
+def is_pending_status(status: str) -> bool:
+    """True, если статус (в т.ч. составной) содержит ожидание вступительных."""
+    return _status_allowed(status, PENDING_STATUSES)
+
+
+def application_score_is_placeholder(app: ApplicationRow) -> bool:
+    """Балл из файла ещё не экзамен: ждут ВИ и в строке 0."""
+    return is_pending_status(app.status) and app.score <= 0.0
+
+
+def profile_has_known_score(profile: ApplicantProfile) -> bool:
+    """Есть хотя бы одна заявка не с заглушкой 0 при ожидании ВИ."""
+    return any(not application_score_is_placeholder(app) for app in profile.applications)
+
+
 def filter_profiles_by_status(
     profiles: dict[int, ApplicantProfile],
     *,
@@ -336,8 +352,6 @@ def filter_profiles_by_status(
             consent=profile.consent,
         )
         _finalize_profile(new_profile)
-        if profile.consent:
-            new_profile.consent = True
         filtered[code] = new_profile
     return filtered
 

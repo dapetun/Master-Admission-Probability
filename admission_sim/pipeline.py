@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from admission_sim.load import load_dataset
 from admission_sim.model import Dataset
 from admission_sim.scenarios import (
+    DEFAULT_THREATS_PER_PROGRAM,
     ConsentScenario,
     Counterfactual,
     ProbabilityEstimate,
@@ -45,15 +47,19 @@ def run_analysis(
     scenario: ConsentScenario = "auto",
     consent_p: float | None = None,
     seed: int = 42,
-    threats: int = 30,
+    threats: int | None = DEFAULT_THREATS_PER_PROGRAM,
+    mc_workers: int | None = None,
+    dataset: Dataset | None = None,
+    focus_program: str | None = None,
 ) -> AnalysisResult:
     """Загружает данные и считает ВПП / ОВП / what-if / Monte Carlo."""
-    dataset = load_dataset(
-        data_dir,
-        seats_path,
-        include_pending=include_pending,
-        campus=campus,
-    )
+    if dataset is None:
+        dataset = load_dataset(
+            data_dir,
+            seats_path,
+            include_pending=include_pending,
+            campus=campus,
+        )
     if my_code not in dataset.applicants:
         raise KeyError(
             f"Код {my_code} не найден среди {len(dataset.applicants)} "
@@ -79,6 +85,9 @@ def run_analysis(
     )
     probability = None
     if monte_carlo > 0:
+        workers = mc_workers
+        if workers is None:
+            workers = min(4, os.cpu_count() or 1)
         probability = estimate_probability(
             dataset.applicants,
             dataset.seats,
@@ -87,6 +96,8 @@ def run_analysis(
             scenario=scenario,
             consent_probability=consent_p,
             seed=seed,
+            n_workers=workers,
+            focus_program=focus_program,
         )
 
     return AnalysisResult(
