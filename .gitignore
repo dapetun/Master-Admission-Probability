@@ -31,6 +31,9 @@ data/raw/*
 !data/raw/.gitkeep
 !data/raw/README.md
 
+# Локальные секреты Streamlit (не коммитить)
+.streamlit/secrets.toml
+
 # Локальные конфиги с числами мест и отчёты
 seats.yaml
 report.md

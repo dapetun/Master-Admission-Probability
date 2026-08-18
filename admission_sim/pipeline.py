@@ -10,10 +10,12 @@ from admission_sim.load import load_dataset
 from admission_sim.model import Dataset
 from admission_sim.scenarios import (
     DEFAULT_THREATS_PER_PROGRAM,
+    ConsentModel,
     ConsentScenario,
     Counterfactual,
     ProbabilityEstimate,
     counterfactuals_for_threats,
+    estimate_consent_model,
     estimate_probability,
     what_if_consent,
 )
@@ -34,6 +36,7 @@ class AnalysisResult:
     include_pending: bool
     zero_seat_programs: list[str]
     unknown_seat_programs: list[str]
+    consent_model: ConsentModel | None = None
 
 
 def run_analysis(
@@ -83,6 +86,11 @@ def run_analysis(
         my_code,
         limit=threats,
     )
+    consent_model = estimate_consent_model(
+        dataset.applicants,
+        dataset.seats,
+        scenario=scenario,
+    )
     probability = None
     if monte_carlo > 0:
         workers = mc_workers
@@ -98,6 +106,7 @@ def run_analysis(
             seed=seed,
             n_workers=workers,
             focus_program=focus_program,
+            consent_model=consent_model,
         )
 
     return AnalysisResult(
@@ -111,4 +120,5 @@ def run_analysis(
         include_pending=include_pending,
         zero_seat_programs=zero_seat_programs,
         unknown_seat_programs=unknown_seat_programs,
+        consent_model=consent_model,
     )

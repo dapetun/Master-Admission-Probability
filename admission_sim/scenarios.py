@@ -35,6 +35,9 @@ UNDECIDED_PRIOR_COMPETITIVE = 0.50
 UNDECIDED_PRIOR_OTHER = 0.20
 PESSIMISTIC_COMPETITIVE_FLOOR = 0.85
 PESSIMISTIC_UNDECIDED_CAP = 0.95
+# Трети конкурентов ОВП: меньше — доля шумная, берём общую p_comp.
+MIN_CONSENT_BAND_N = 15
+CONSENT_BAND_LABELS = ("верх списка", "середина", "низ списка")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,17 @@ class Counterfactual:
 
 
 @dataclass(frozen=True, slots=True)
+class ConsentBand:
+    """Доля уже подавших согласие в трети конкурентов ОВП."""
+
+    label: str
+    n: int
+    consented: int
+    rate: float
+    n_undecided: int
+
+
+@dataclass(frozen=True, slots=True)
 class ConsentModel:
     """Индивидуальные P(согласие) и сводка для отчёта."""
 
@@ -64,6 +78,7 @@ class ConsentModel:
     description: str
     scored_n: int = 0
     pending_unknown_n: int = 0
+    bands: tuple[ConsentBand, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +236,112 @@ def _pessimistic_p(base: float, *, competitor: bool, overall: float) -> float:
     return float(bumped)
 
 
+def _rank_percentiles_on_programs(
+    scored: dict[int, ApplicantProfile],
+) -> dict[tuple[int, str], float]:
+    """0 — лучшее место среди людей с известными баллами на программе."""
+    by_program: dict[str, list[tuple[int, int]]] = {}
+    for code, profile in scored.items():
+        for app in profile.applications:
+            by_program.setdefault(app.program, []).append((app.rank, code))
+    out: dict[tuple[int, str], float] = {}
+    for program, rows in by_program.items():
+        rows.sort()
+        n = len(rows)
+        denom = n - 1
+        for index, (_rank, code) in enumerate(rows):
+            out[(code, program)] = (index / denom) if denom else 0.0
+    return out
+
+
+def _is_pri1_on_dest(profile: ApplicantProfile, dest: str) -> bool:
+    app = profile.application_for(dest)
+    return app is not None and app.priority == 1
+
+
+def _competitive_band_probs(
+    competitive: list[int],
+    scored: dict[int, ApplicantProfile],
+    ovp_dest: dict[int, str | None],
+    p_comp: float,
+) -> tuple[tuple[ConsentBand, ...], dict[int, float]]:
+    """Трети конкурентов по месту; при малом n — общая p_comp."""
+    if not competitive:
+        return (), {}
+
+    percentiles = _rank_percentiles_on_programs(scored)
+    keyed: list[tuple[float, int]] = []
+    missing: list[int] = []
+    for code in competitive:
+        dest = ovp_dest.get(code)
+        if dest is None or dest == EXTERNAL:
+            missing.append(code)
+            continue
+        pct = percentiles.get((code, dest))
+        if pct is None:
+            missing.append(code)
+            continue
+        keyed.append((pct, code))
+
+    keyed.sort()
+    n_keyed = len(keyed)
+    band_codes: list[list[int]] = [[], [], []]
+    for index, (_pct, code) in enumerate(keyed):
+        band = min(2, (index * 3) // n_keyed) if n_keyed else 0
+        band_codes[band].append(code)
+
+    bands: list[ConsentBand] = []
+    band_p: list[float] = []
+    for codes in band_codes:
+        raw = _rate(codes, scored)
+        consented = sum(1 for c in codes if scored[c].consent)
+        p = (
+            p_comp
+            if len(codes) < MIN_CONSENT_BAND_N
+            else _undecided_rate(raw, UNDECIDED_PRIOR_COMPETITIVE)
+        )
+        bands.append(
+            ConsentBand(
+                label=CONSENT_BAND_LABELS[len(bands)],
+                n=len(codes),
+                consented=consented,
+                rate=float(raw if raw is not None else 0.0),
+                n_undecided=len(codes) - consented,
+            )
+        )
+        band_p.append(p)
+
+    assigned: dict[int, float] = {code: p_comp for code in missing}
+    for band_i, codes in enumerate(band_codes):
+        base = band_p[band_i]
+        pri1 = [
+            c
+            for c in codes
+            if (dest := ovp_dest.get(c))
+            and dest != EXTERNAL
+            and _is_pri1_on_dest(scored[c], dest)
+        ]
+        rest = [c for c in codes if c not in set(pri1)]
+        can_split = (
+            len(codes) >= MIN_CONSENT_BAND_N
+            and len(pri1) >= MIN_CONSENT_BAND_N
+            and len(rest) >= MIN_CONSENT_BAND_N
+        )
+        if can_split:
+            p1 = _undecided_rate(_rate(pri1, scored), UNDECIDED_PRIOR_COMPETITIVE)
+            p_rest = _undecided_rate(
+                _rate(rest, scored), UNDECIDED_PRIOR_COMPETITIVE
+            )
+            for c in pri1:
+                assigned[c] = p1
+            for c in rest:
+                assigned[c] = p_rest
+        else:
+            for c in codes:
+                assigned[c] = base
+    return tuple(bands), assigned
+
+
 def estimate_consent_model(
     applicants: dict[int, ApplicantProfile],
     seats: dict[str, int | None],
@@ -237,8 +358,13 @@ def estimate_consent_model(
     вступительных с 0 в файле не размывает эмпирику и не делает
     человека «конкурентом» из-за свободных мест.
 
+    Среди конкурентов ОВП «Авто» берёт долю согласия в трети списка
+    (по месту на программе назначения ОВП). Маленькая треть (<15)
+    откатывается к общей доле конкурентов. Приоритет 1 внутри трети —
+    только если обе ячейки достаточно большие.
+
     scenario:
-      auto — индивидуально из долей (конкурентные / внешние / прочие);
+      auto — индивидуально из долей (конкурентные по трети / внешние / прочие);
       balanced — одна общая доля overall (не 100%, если это артефакт снимка);
       optimistic — конкуренты реже соглашаются (лучше для вас);
       pessimistic — конкуренты чаще, но не 100%.
@@ -322,16 +448,9 @@ def estimate_consent_model(
     )
     overall = _undecided_rate(overall_raw, UNDECIDED_PRIOR_OVERALL)
 
-    pri1_comp = [
-        c
-        for c in competitive
-        if any(
-            a.priority == 1 and a.program == ovp_dest[c]
-            for a in scored[c].applications
-        )
-    ]
-    p_pri1_raw = _rate(pri1_comp, scored)
-    p_pri1 = _undecided_rate(p_pri1_raw, min(PESSIMISTIC_UNDECIDED_CAP, p_comp + 0.1))
+    bands, competitive_p = _competitive_band_probs(
+        competitive, scored, ovp_dest, p_comp
+    )
 
     # Базовые (auto) вероятности — только для неопределившихся < 1.0
     auto_probs: dict[int, float] = {}
@@ -348,11 +467,7 @@ def estimate_consent_model(
             continue
         dest = ovp_dest.get(code)
         if dest is not None and dest != EXTERNAL:
-            app = profile.application_for(dest)
-            if app is not None and app.priority == 1:
-                auto_probs[code] = float(p_pri1)
-            else:
-                auto_probs[code] = float(p_comp)
+            auto_probs[code] = float(competitive_p.get(code, p_comp))
             competitor_flags[code] = True
         elif dest == EXTERNAL:
             auto_probs[code] = float(p_ext)
@@ -397,11 +512,18 @@ def estimate_consent_model(
             else ""
         )
     )
+    band_note = ""
+    if any(band.n for band in bands):
+        parts = [
+            f"{band.label}={band.rate:.0%} (n={band.n})" for band in bands
+        ]
+        band_note = "; по месту среди конкурентов: " + ", ".join(parts)
     description = (
         f"{label}: {pending_note} (не 100%; "
         f"«согласие подадут все» — отдельный крайний случай); "
         f"все вместе={overall_raw:.0%}, "
-        f"конкуренты={report_comp:.0%}, прочие={report_other:.0%}, "
+        f"конкуренты={report_comp:.0%}, прочие={report_other:.0%}"
+        f"{band_note}; "
         f"средняя доля без согласия={mean_und:.0%}"
     )
     return ConsentModel(
@@ -413,6 +535,7 @@ def estimate_consent_model(
         description=description,
         scored_n=len(scored),
         pending_unknown_n=pending_unknown_n,
+        bands=bands,
     )
 
 
@@ -517,6 +640,7 @@ def estimate_probability(
     seed: int = 42,
     n_workers: int = 1,
     focus_program: str | None = None,
+    consent_model: ConsentModel | None = None,
 ) -> ProbabilityEstimate:
     """
     Monte Carlo: у каждого без согласия — своя P(согласие).
@@ -525,6 +649,7 @@ def estimate_probability(
     consent_probability — ручной override одной константой (игнорирует scenario).
     n_workers — параллельные процессы для MC (>1 ускоряет на многоядерном CPU).
     focus_program — считать шансы для одной программы (подграф DA, быстрее).
+    consent_model — готовая модель согласий; иначе считается здесь.
     Ваш код в каждом прогоне считается согласившимся.
     """
     if applicant_code not in applicants:
@@ -567,7 +692,9 @@ def estimate_probability(
         )
         mean_p = float(consent_probability)
     else:
-        model = estimate_consent_model(applicants, seats, scenario=scenario)
+        model = consent_model or estimate_consent_model(
+            applicants, seats, scenario=scenario
+        )
         probs = model.by_code
         model_desc = model.description
         mean_p = model.mean_undecided

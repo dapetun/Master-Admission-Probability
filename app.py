@@ -7,21 +7,29 @@ from pathlib import Path
 import streamlit as st
 
 from admission_sim.load import load_dataset
-from admission_sim.model import EXTERNAL
 from admission_sim.pipeline import run_analysis
 from admission_sim.report import (
+    CONSENT_BANDS_CAPTION,
     MC_SCENARIO_UNCERTAINTY_NOTE,
     PENDING_SCORE_CAPTION,
     SEAT_FILL_CAPTION,
     THREATS_SELECT_PROGRAM_CAPTION,
+    build_focus_hero_data,
     build_markdown_report,
+    consent_band_chart,
+    consent_band_rows,
     filter_counterfactuals_by_overlap,
+    focus_hero_html,
+    focus_program_shares_by_scenario,
+    has_consent_bands,
     mc_ci95_note,
     my_program_names,
     other_programs_note,
     pending_ahead_rows,
     prepare_threats_view,
+    probability_chart_rows,
     program_fill_stats,
+    resolve_hero_program,
     seat_fill_rows,
     threat_table_rows,
     _fmt_dest,
@@ -42,6 +50,100 @@ ANALYSIS_KEY_KEY = "analysis_key"
 THREATS_OVERLAP_KEY = "threats_overlap_programs"
 THREATS_OVERLAP_CODE_KEY = "threats_overlap_for_code"
 THREATS_OVERLAP_OPTIONS_KEY = "threats_overlap_options"
+
+
+def app_styles() -> str:
+    """Единый CSS приложения: отступы, hero-блок, мягкие callout."""
+    return """
+<style>
+.block-container {
+    padding-top: 1.35rem;
+}
+[data-testid="stSidebar"] {
+    border-right: 1px solid #D8DEE4;
+}
+h1, h2, h3 {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #454340;
+}
+[data-testid="stMetric"] {
+    background: #FAFBFC;
+    border: 1px solid #D8DEE4;
+    border-radius: 10px;
+    padding: 0.65rem 0.75rem;
+    box-shadow: 0 1px 2px rgba(69, 67, 64, 0.04);
+}
+.focus-hero {
+    background: #EEF1F4;
+    border: 1px solid #D8DEE4;
+    border-radius: 12px;
+    padding: 1.35rem 1.5rem 1.15rem;
+    margin: 0.35rem 0 1rem;
+    box-shadow: 0 1px 3px rgba(69, 67, 64, 0.05);
+}
+.focus-hero__title {
+    font-size: 1.65rem;
+    font-weight: 600;
+    line-height: 1.25;
+    color: #454340;
+    margin: 0 0 0.45rem;
+}
+.focus-hero__meta {
+    color: #6B7280;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    margin: 0 0 0.95rem;
+}
+.focus-hero__callout {
+    background: #EEF2F6;
+    border: 1px solid #D5DCE4;
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    margin-bottom: 1.1rem;
+    color: #5A6570;
+    font-size: 0.92rem;
+    line-height: 1.45;
+}
+.focus-hero__callout-title {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+.focus-hero__metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+@media (max-width: 900px) {
+    .focus-hero__metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+.focus-hero__metric {
+    background: #FAFBFC;
+    border: 1px solid #D8DEE4;
+    border-radius: 10px;
+    padding: 0.85rem 0.65rem 0.75rem;
+    text-align: center;
+    box-shadow: 0 1px 2px rgba(69, 67, 64, 0.03);
+}
+.focus-hero__metric--active {
+    border-color: #A8B0BA;
+    box-shadow: inset 0 0 0 1px #C5CDD5;
+}
+.focus-hero__metric-value {
+    font-size: 1.85rem;
+    font-weight: 600;
+    line-height: 1.1;
+    margin-bottom: 0.35rem;
+}
+.focus-hero__metric-label {
+    color: #6B7280;
+    font-size: 0.82rem;
+    line-height: 1.25;
+}
+</style>
+"""
 
 
 def analysis_input_key(
@@ -121,7 +223,7 @@ def _dir_mtime(path: Path) -> float:
     return max(f.stat().st_mtime for f in files)
 
 
-@st.cache_data(show_spinner="Загрузка списков…")
+@st.cache_resource(max_entries=8, show_spinner="Загрузка списков…")
 def _load_dataset_cached(
     data_dir_str: str,
     seats_path_str: str,
@@ -130,6 +232,7 @@ def _load_dataset_cached(
     data_mtime: float,
     seats_mtime: float,
 ):
+    """Общий Dataset: симуляция его не меняет, копировать через cache_data дорого."""
     return load_dataset(
         Path(data_dir_str),
         Path(seats_path_str),
@@ -138,8 +241,207 @@ def _load_dataset_cached(
     )
 
 
+@st.fragment
+def _render_threats_section() -> None:
+    """Фильтр угроз без полного пересчёта страницы (результат — в session_state)."""
+    result = st.session_state[ANALYSIS_RESULT_KEY]
+    dest = result.vpp.destination(result.my_code)
+    my_programs = my_program_names(result.dataset, result.my_code)
+    threats_view = prepare_threats_view(result.counterfactuals, dest)
+    st.subheader(threats_view.title)
+    skip_threats_table = False
+    if result.counterfactuals and my_programs:
+        next_selection = threats_filter_selection(
+            my_code=result.my_code,
+            my_programs=my_programs,
+            stored_code=st.session_state.get(THREATS_OVERLAP_CODE_KEY),
+            stored_options=st.session_state.get(THREATS_OVERLAP_OPTIONS_KEY),
+            stored_selected=st.session_state.get(THREATS_OVERLAP_KEY),
+        )
+        if st.session_state.get(THREATS_OVERLAP_KEY) != next_selection:
+            st.session_state[THREATS_OVERLAP_KEY] = next_selection
+        st.session_state[THREATS_OVERLAP_CODE_KEY] = result.my_code
+        st.session_state[THREATS_OVERLAP_OPTIONS_KEY] = tuple(my_programs)
+        selected_overlap = selected_overlap_programs(
+            st.multiselect(
+                "Программы пересечения",
+                options=my_programs,
+                placeholder=THREATS_SELECT_PROGRAM_CAPTION,
+                help=(
+                    "В таблице остаются люди, которые выше вас без согласия "
+                    "на выбранных программах и при согласии занимают именно её. "
+                    "По умолчанию — все ваши. Кто ушёл бы на другую программу "
+                    "или вовне, скрыт. Список для каждой программы считается "
+                    "отдельно, фильтр только прячет строки."
+                ),
+                key=THREATS_OVERLAP_KEY,
+            ),
+            my_programs,
+        )
+        if not selected_overlap:
+            st.caption(THREATS_SELECT_PROGRAM_CAPTION)
+            skip_threats_table = True
+        else:
+            threats_view = prepare_threats_view(
+                filter_counterfactuals_by_overlap(
+                    result.counterfactuals,
+                    set(selected_overlap),
+                ),
+                dest,
+                filtered=True,
+            )
+    if skip_threats_table:
+        return
+    if threats_view.caption:
+        for paragraph in threats_view.caption.split("\n\n"):
+            st.caption(paragraph)
+    if threats_view.empty_message:
+        st.write(threats_view.empty_message)
+    elif threats_view.shown:
+        st.dataframe(threat_table_rows(threats_view), hide_index=True)
+    if threats_view.count_caption:
+        st.caption(threats_view.count_caption)
+
+
+@st.cache_data(show_spinner="Сценарии…", max_entries=8)
+def _cached_hero_scenario_shares(
+    data_dir_str: str,
+    seats_path_str: str,
+    include_pending: bool,
+    campus: str | None,
+    my_code: int,
+    monte_carlo: int,
+    focus_program: str,
+    active_scenario: str,
+    active_share: float,
+    active_focus_program: str | None,
+    data_mtime: float,
+    seats_mtime: float,
+) -> dict[str, float]:
+    """Кэш сравнения сценариев для hero-блока (дороже одного прогона MC)."""
+    dataset = _load_dataset_cached(
+        data_dir_str,
+        seats_path_str,
+        include_pending,
+        campus,
+        data_mtime,
+        seats_mtime,
+    )
+    shares = focus_program_shares_by_scenario(
+        dataset.applicants,
+        dataset.seats,
+        my_code,
+        focus_program=focus_program,
+        n_simulations=monte_carlo,
+        current_scenario=active_scenario,  # type: ignore[arg-type]
+        current_share=active_share,
+        current_focus_program=active_focus_program,
+    )
+    return dict(shares)
+
+
+def _hero_scenario_shares(
+    result,
+    focus_program: str,
+    *,
+    consent_p: float | None,
+    data_dir: Path,
+    seats_path: Path,
+    campus_val: str | None,
+    data_mtime: float,
+    seats_mtime: float,
+) -> dict[str, float]:
+    """Доли прогонов по сценариям для hero; при ручном p — один сценарий."""
+    p = result.probability
+    assert p is not None
+    active_share = p.by_program.get(focus_program, 0.0)
+    if consent_p is not None:
+        return {scenario: active_share for scenario in SCENARIO_LABELS}
+    return _cached_hero_scenario_shares(
+        str(data_dir),
+        str(seats_path),
+        result.include_pending,
+        campus_val,
+        result.my_code,
+        p.n_simulations,
+        focus_program,
+        p.scenario,
+        active_share,
+        p.focus_program,
+        data_mtime,
+        seats_mtime,
+    )
+
+
+def _render_focus_hero(
+    result,
+    *,
+    consent_p: float | None,
+    active_scenario: str,
+    data_dir: Path,
+    seats_path: Path,
+    campus_val: str | None,
+    data_mtime: float,
+    seats_mtime: float,
+) -> None:
+    """Hero-блок фокусной программы со сравнением сценариев."""
+    p = result.probability
+    if p is None:
+        return
+    focus_program = resolve_hero_program(
+        my_program_names(result.dataset, result.my_code),
+        p,
+    )
+    if focus_program is None:
+        return
+    scenario_shares = _hero_scenario_shares(
+        result,
+        focus_program,
+        consent_p=consent_p,
+        data_dir=data_dir,
+        seats_path=seats_path,
+        campus_val=campus_val,
+        data_mtime=data_mtime,
+        seats_mtime=seats_mtime,
+    )
+    hero = build_focus_hero_data(
+        result.dataset,
+        result.my_code,
+        p,
+        scenario_shares=scenario_shares,  # type: ignore[arg-type]
+        active_scenario=active_scenario,  # type: ignore[arg-type]
+        manual_consent=consent_p is not None,
+    )
+    if hero is None:
+        return
+    st.markdown(focus_hero_html(hero), unsafe_allow_html=True)
+
+
+@st.fragment
+def _render_report_download() -> None:
+    """Скачивание и Markdown: тяжёлый рендер только при открытом блоке."""
+    result = st.session_state[ANALYSIS_RESULT_KEY]
+    md = build_markdown_report(
+        result.dataset,
+        result.my_code,
+        vpp=result.vpp,
+        vpp_if_consent=result.vpp_if_consent,
+        ovp=result.ovp,
+        counterfactuals=result.counterfactuals,
+        probability=result.probability,
+        include_pending=result.include_pending,
+        consent_model=result.consent_model,
+    )
+    st.download_button("Скачать report.md", md, file_name="report.md")
+    md_exp = st.expander("Полный Markdown", on_change="rerun")
+    if md_exp.open:
+        with md_exp:
+            st.markdown(md)
+
+
 def main() -> None:
     st.set_page_config(page_title="Симулятор поступления", layout="wide")
+    st.markdown(app_styles(), unsafe_allow_html=True)
     st.session_state.setdefault(ANALYSIS_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_KEY_KEY, None)
     st.title("Симулятор приоритетов магистратуры")
@@ -189,75 +491,16 @@ def main() -> None:
                 "согласие. 0 — не считать."
             ),
         )
-        campus_val_preview = campus.strip() or None
-        user_programs: list[str] = []
-        preview_dataset = None
-        code_preview = my_code_raw.strip()
-        if code_preview.isdigit() and data_dir.is_dir():
-            try:
-                preview_dataset = _load_dataset_cached(
-                    str(data_dir),
-                    str(seats_path),
-                    include_pending,
-                    campus_val_preview,
-                    _dir_mtime(data_dir),
-                    seats_path.stat().st_mtime if seats_path.is_file() else 0.0,
-                )
-                uid = int(code_preview)
-                if uid in preview_dataset.applicants:
-                    user_programs = my_program_names(preview_dataset, uid)
-            except (FileNotFoundError, ValueError, OSError):
-                preview_dataset = None
-
-        focus_program = None
-        if user_programs and monte_carlo > 0:
-            focus_choice = st.selectbox(
-                "Программа для случайных прогонов",
-                options=[FOCUS_ALL, *user_programs],
-                index=0,
-                help=(
-                    "Одна программа ускоряет расчёт: не считаем все конкурсы, "
-                    "но оставляем те, куда люди могут уйти по более высокому "
-                    "приоритету. «Все мои программы» — полный расчёт, как раньше."
-                ),
-            )
-            if focus_choice != FOCUS_ALL:
-                focus_program = focus_choice
-                if preview_dataset is not None:
-                    reduced, red_seats = subgraph_for_program(
-                        preview_dataset.applicants,
-                        preview_dataset.seats,
-                        focus_choice,
-                    )
-                    st.caption(
-                        f"В случайные прогоны войдут {len(red_seats)} конкурсов "
-                        f"из {len(preview_dataset.programs)} и "
-                        f"{len(reduced)} абитуриентов "
-                        f"из {len(preview_dataset.applicants)}."
-                    )
-        if monte_carlo >= 3000:
-            campus_hint = (
-                " Укажите кампус — расчёт быстрее."
-                if not campus.strip()
-                else ""
-            )
-            focus_hint = (
-                " Или выберите одну программу выше."
-                if not focus_program
-                else ""
-            )
-            st.warning(
-                f"При {monte_carlo} прогонах на полных данных ожидайте "
-                f"примерно {max(1, monte_carlo // 40)}–{max(2, monte_carlo // 25)} с "
-                f"(4 ядра). "
-                f"Для быстрой оценки достаточно 500–1000.{campus_hint}{focus_hint}"
-            )
+        focus_slot = st.container()
         scenario_label = st.radio(
             "Сценарий согласий прочих",
             options=list(SCENARIO_LABELS.values()),
             index=0,
+            key="scenario_label",
             help=(
-                "Авто — доли согласия, уже видные в списках, не «согласятся все». "
+                "Авто — доли согласия, уже видные в списках, отдельно "
+                "для верхней, средней и нижней трети конкурентов по месту. "
+                "Не «согласятся все». "
                 "Гарантия «пройду, даже если согласие подадут все» — отдельный "
                 "крайний случай в результатах, не случайные прогоны. "
                 "Оптимистичный — конкуренты реже соглашаются. "
@@ -283,6 +526,72 @@ def main() -> None:
                     0.05,
                 )
         run = st.button("Рассчитать", type="primary", width="stretch")
+
+        campus_val_preview = campus.strip() or None
+        user_programs: list[str] = []
+        preview_dataset = None
+        focus_program = None
+        code_preview = my_code_raw.strip()
+        if code_preview.isdigit() and data_dir.is_dir():
+            with focus_slot.skeleton():
+                try:
+                    preview_dataset = _load_dataset_cached(
+                        str(data_dir),
+                        str(seats_path),
+                        include_pending,
+                        campus_val_preview,
+                        _dir_mtime(data_dir),
+                        seats_path.stat().st_mtime if seats_path.is_file() else 0.0,
+                    )
+                    uid = int(code_preview)
+                    if uid in preview_dataset.applicants:
+                        user_programs = my_program_names(preview_dataset, uid)
+                except (FileNotFoundError, ValueError, OSError):
+                    preview_dataset = None
+        with focus_slot:
+            if user_programs and monte_carlo > 0:
+                focus_choice = st.selectbox(
+                    "Программа для случайных прогонов",
+                    options=[FOCUS_ALL, *user_programs],
+                    index=0,
+                    key="focus_program_choice",
+                    help=(
+                        "Одна программа ускоряет расчёт: не считаем все конкурсы, "
+                        "но оставляем те, куда люди могут уйти по более высокому "
+                        "приоритету. «Все мои программы» — полный расчёт, как раньше."
+                    ),
+                )
+                if focus_choice != FOCUS_ALL:
+                    focus_program = focus_choice
+                    if preview_dataset is not None:
+                        reduced, red_seats = subgraph_for_program(
+                            preview_dataset.applicants,
+                            preview_dataset.seats,
+                            focus_choice,
+                        )
+                        st.caption(
+                            f"В случайные прогоны войдут {len(red_seats)} конкурсов "
+                            f"из {len(preview_dataset.programs)} и "
+                            f"{len(reduced)} абитуриентов "
+                            f"из {len(preview_dataset.applicants)}."
+                        )
+            if monte_carlo >= 3000:
+                campus_hint = (
+                    " Укажите кампус — расчёт быстрее."
+                    if not campus.strip()
+                    else ""
+                )
+                focus_hint = (
+                    " Или выберите одну программу выше."
+                    if not focus_program
+                    else ""
+                )
+                st.warning(
+                    f"При {monte_carlo} прогонах на полных данных ожидайте "
+                    f"примерно {max(1, monte_carlo // 40)}–{max(2, monte_carlo // 25)} с "
+                    f"(4 ядра). "
+                    f"Для быстрой оценки достаточно 500–1000.{campus_hint}{focus_hint}"
+                )
 
     code_text = my_code_raw.strip()
     campus_val = campus.strip() or None
@@ -451,15 +760,53 @@ def main() -> None:
     if result.include_pending:
         st.caption(PENDING_SCORE_CAPTION)
 
+    model = result.consent_model
+    if has_consent_bands(model) and model is not None:
+        st.subheader("Согласия по месту в списке")
+        st.altair_chart(consent_band_chart(model.bands), use_container_width=False)
+        st.dataframe(
+            consent_band_rows(model.bands),
+            hide_index=True,
+        )
+        st.caption(CONSENT_BANDS_CAPTION)
+        if result.probability is None:
+            st.caption(model.description)
+
     if result.probability is not None:
         st.subheader("Случайные прогоны")
         p = result.probability
+        _render_focus_hero(
+            result,
+            consent_p=consent_p,
+            active_scenario=p.scenario,
+            data_dir=data_dir,
+            seats_path=seats_path,
+            campus_val=campus_val,
+            data_mtime=data_mtime,
+            seats_mtime=seats_mtime,
+        )
         st.write(
             f"Сценарий: **{SCENARIO_LABELS.get(p.scenario, p.scenario)}** · "
-            f"шанс зачисления на загруженную программу = **{p.any_loaded:.1%}** · "
             f"шанс ухода вне загруженных программ = {p.external:.1%} · "
             f"шанс без зачисления = {p.none:.1%}"
         )
+        if p.by_program:
+            st.bar_chart(
+                probability_chart_rows(p.by_program),
+                x="Программа",
+                y="Доля прогонов, %",
+                horizontal=True,
+                sort=False,
+                x_label="Доля прогонов, %",
+                color="primary",
+                height=max(220, 52 * len(p.by_program)),
+            )
+            st.caption(
+                "Доля прогонов с зачислением на программу, %. "
+                "В одном прогоне — одна программа; сумма ≈ шанс любой загруженной. "
+                "Сравнение четырёх сценариев на одном графике не строится: "
+                "каждый сценарий — отдельный расчёт."
+            )
         st.caption(p.consent_model_description)
         st.caption(
             "Много раз случайно решаем, кто из неопределившихся подаст согласие "
@@ -474,11 +821,6 @@ def main() -> None:
                 "Другие конкурсы включены, только если по более высокому "
                 "приоритету с них могут уйти люди, которые претендуют и сюда."
             )
-        st.caption(
-            "Только ваши программы в этом расчёте: доля прогонов с зачислением "
-            "именно сюда. В одном прогоне — одна программа; "
-            "сумма строк ≈ шанс любой загруженной."
-        )
         st.dataframe(
             [
                 {
@@ -509,74 +851,8 @@ def main() -> None:
     if other_note:
         st.caption(other_note)
 
-    dest = result.vpp.destination(result.my_code)
-    threats_view = prepare_threats_view(result.counterfactuals, dest)
-    st.subheader(threats_view.title)
-    skip_threats_table = False
-    if result.counterfactuals and my_programs:
-        next_selection = threats_filter_selection(
-            my_code=result.my_code,
-            my_programs=my_programs,
-            stored_code=st.session_state.get(THREATS_OVERLAP_CODE_KEY),
-            stored_options=st.session_state.get(THREATS_OVERLAP_OPTIONS_KEY),
-            stored_selected=st.session_state.get(THREATS_OVERLAP_KEY),
-        )
-        if st.session_state.get(THREATS_OVERLAP_KEY) != next_selection:
-            st.session_state[THREATS_OVERLAP_KEY] = next_selection
-        st.session_state[THREATS_OVERLAP_CODE_KEY] = result.my_code
-        st.session_state[THREATS_OVERLAP_OPTIONS_KEY] = tuple(my_programs)
-        selected_overlap = selected_overlap_programs(
-            st.multiselect(
-                "Программы пересечения",
-                options=my_programs,
-                placeholder=THREATS_SELECT_PROGRAM_CAPTION,
-                help=(
-                    "В таблице остаются люди, которые выше вас без согласия "
-                    "на выбранных программах и при согласии занимают именно её. "
-                    "По умолчанию — все ваши. Кто ушёл бы на другую программу "
-                    "или вовне, скрыт. Список для каждой программы считается "
-                    "отдельно, фильтр только прячет строки."
-                ),
-                key=THREATS_OVERLAP_KEY,
-            ),
-            my_programs,
-        )
-        if not selected_overlap:
-            st.caption(THREATS_SELECT_PROGRAM_CAPTION)
-            skip_threats_table = True
-        else:
-            threats_view = prepare_threats_view(
-                filter_counterfactuals_by_overlap(
-                    result.counterfactuals,
-                    set(selected_overlap),
-                ),
-                dest,
-                filtered=True,
-            )
-    if not skip_threats_table:
-        if threats_view.caption:
-            for paragraph in threats_view.caption.split("\n\n"):
-                st.caption(paragraph)
-        if threats_view.empty_message:
-            st.write(threats_view.empty_message)
-        elif threats_view.shown:
-            st.dataframe(threat_table_rows(threats_view), hide_index=True)
-        if threats_view.count_caption:
-            st.caption(threats_view.count_caption)
-
-    md = build_markdown_report(
-        result.dataset,
-        result.my_code,
-        vpp=result.vpp,
-        vpp_if_consent=result.vpp_if_consent,
-        ovp=result.ovp,
-        counterfactuals=result.counterfactuals,
-        probability=result.probability,
-        include_pending=result.include_pending,
-    )
-    st.download_button("Скачать report.md", md, file_name="report.md")
-    with st.expander("Полный Markdown"):
-        st.markdown(md)
+    _render_threats_section()
+    _render_report_download()
 
     st.markdown("---")
     st.caption(f"{DISCLAIMER} {LICENSE_NOTE}")

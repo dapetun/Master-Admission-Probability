@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +12,16 @@ from rich.table import Table
 
 from admission_sim.load import is_pending_status
 from admission_sim.model import EXTERNAL, ApplicantProfile, Dataset
-from admission_sim.scenarios import SCENARIO_LABELS, Counterfactual, ProbabilityEstimate
+from admission_sim.scenarios import (
+    CONSENT_BAND_LABELS,
+    SCENARIO_LABELS,
+    ConsentBand,
+    ConsentModel,
+    ConsentScenario,
+    Counterfactual,
+    ProbabilityEstimate,
+    estimate_probability,
+)
 from admission_sim.simulate import EnrollmentResult
 
 
@@ -75,6 +86,14 @@ MC_SCENARIO_UNCERTAINTY_NOTE = (
     "Разброс между сценариями согласий (авто / пессимистичный) обычно больше: "
     "сравнивайте сценарии, а не гонитесь за тысячными долями."
 )
+CONSENT_BANDS_CAPTION = (
+    "Среди тех, кто в крайнем случае «согласие подадут все» занял бы "
+    "загруженное место: какая доля уже подала согласие в верхней, средней "
+    "и нижней трети списка (верх — лучше место). Это снимок «уже "
+    "согласились», а не прогноз, что оставшиеся ещё согласятся к дедлайну. "
+    "Если сверху доля выше — в этой выгрузке сильные чаще уже с согласием; "
+    "Авто тогда даёт сильным без согласия более высокую вероятность."
+)
 UNKNOWN_SEATS_LABEL = "число мест неизвестно"
 NO_RANK_THREATS_MESSAGE = (
     "Нет абитуриентов выше вас без согласия на ваших программах"
@@ -116,6 +135,29 @@ THREATS_ALL_LEAVE_MESSAGE = (
     "(ушли бы на другую / вовне)."
 )
 THREATS_SELECT_PROGRAM_CAPTION = "выберите программу"
+
+FOCUS_HERO_WARNING_TITLE = (
+    "Не путать 100% «куда-нибудь» с шансом на приоритет 1"
+)
+FOCUS_HERO_WARNING_BODY = (
+    "«Любая загруженная» — сумма по всем вашим программам в одном прогоне. "
+    "Цифры ниже — доля прогонов с зачислением именно на выбранную программу."
+)
+SCENARIO_HERO_LABELS: dict[ConsentScenario, str] = {
+    "auto": "Авто",
+    "balanced": "Сбалансированный",
+    "optimistic": "Оптимистичный",
+    "pessimistic": "Пессимистичный",
+}
+SCENARIO_HERO_COLORS: dict[ConsentScenario, str] = {
+    "auto": "#6E8A9A",
+    "balanced": "#7B8494",
+    "optimistic": "#6B9080",
+    "pessimistic": "#A67B7B",
+}
+
+CHART_BAR_COLOR = "#8BA4BE"
+CHART_LABEL_COLOR = "#454340"
 
 
 def filter_counterfactuals_by_overlap(
@@ -470,6 +512,283 @@ def threat_table_rows(view: ThreatsView) -> list[dict[str, object]]:
     ]
 
 
+def consent_band_rows(
+    bands: tuple[ConsentBand, ...] | list[ConsentBand],
+) -> list[dict[str, object]]:
+    """Строки диагностики: доля согласий по трети списка конкурентов ОВП."""
+    return [
+        {
+            "Треть списка": band.label,
+            "Людей": band.n,
+            "Уже с согласием": band.consented,
+            "Без согласия": band.n_undecided,
+        }
+        for band in bands
+    ]
+
+
+def consent_band_chart_rows(
+    bands: tuple[ConsentBand, ...] | list[ConsentBand],
+) -> list[dict[str, object]]:
+    """Данные для столбчатой диаграммы доли согласий по третям."""
+    return [
+        {
+            "Треть списка": band.label,
+            "Уже с согласием, %": round(band.rate * 100, 1),
+        }
+        for band in bands
+    ]
+
+
+def consent_band_chart(
+    bands: tuple[ConsentBand, ...] | list[ConsentBand],
+):
+    """Горизонтальная диаграмма доли согласий по третям списка (0–100%)."""
+    import altair as alt
+    import pandas as pd
+
+    rows = consent_band_chart_rows(bands)
+    chart_height = max(200, 58 * len(bands))
+    # Vega-Lite: первый элемент sort — внизу; нужен верх → середина → низ сверху вниз.
+    y_sort = list(reversed(CONSENT_BAND_LABELS))
+
+    base = alt.Chart(pd.DataFrame(rows)).encode(
+        y=alt.Y(
+            "Треть списка:N",
+            sort=y_sort,
+            title=None,
+            axis=alt.Axis(labelFontSize=13, labelPadding=6),
+        ),
+        x=alt.X(
+            "Уже с согласием, %:Q",
+            scale=alt.Scale(domain=[0, 100]),
+            title="Уже с согласием, %",
+            axis=alt.Axis(format=".0f", labelFontSize=12, tickCount=6),
+        ),
+        tooltip=[
+            alt.Tooltip("Треть списка", title="Треть списка"),
+            alt.Tooltip(
+                "Уже с согласием, %",
+                title="Уже с согласием, %",
+                format=".1f",
+            ),
+        ],
+    )
+
+    bars = base.mark_bar(color=CHART_BAR_COLOR, cornerRadiusEnd=3)
+    labels = base.mark_text(
+        align="left",
+        baseline="middle",
+        dx=4,
+        color=CHART_LABEL_COLOR,
+        fontSize=12,
+    ).encode(text=alt.Text("Уже с согласием, %:Q", format=".1f"))
+
+    return (
+        (bars + labels)
+        .properties(width=440, height=chart_height)
+        .configure_view(strokeWidth=0)
+        .configure_axis(grid=False)
+    )
+
+
+def probability_chart_rows(by_program: dict[str, float]) -> list[dict[str, object]]:
+    """Данные для столбчатой диаграммы доли прогонов по программам."""
+    return [
+        {
+            "Программа": name,
+            "Доля прогонов, %": round(share * 100, 1),
+        }
+        for name, share in by_program.items()
+    ]
+
+
+def short_program_label(name: str) -> str:
+    """Короткое имя программы для метрик: без кампуса в скобках."""
+    head, sep, _rest = name.partition(" (")
+    return head if sep else name
+
+
+@dataclass(frozen=True, slots=True)
+class FocusHeroData:
+    """Данные для hero-блока фокусной программы в веб-интерфейсе."""
+
+    program: str
+    title: str
+    my_code: int
+    priority: int
+    rank: int
+    score: float
+    seats_label: str
+    n_simulations: int
+    any_loaded: float
+    backup_note: str | None
+    scenario_shares: dict[ConsentScenario, float]
+    active_scenario: ConsentScenario
+    manual_consent: bool
+
+
+def resolve_hero_program(
+    my_programs: list[str],
+    probability: ProbabilityEstimate | None,
+) -> str | None:
+    """Программа для hero: focus из расчёта или первая по приоритету."""
+    if not my_programs:
+        return None
+    if probability is not None and probability.focus_program:
+        return probability.focus_program
+    return my_programs[0]
+
+
+def backup_program_note(
+    by_program: dict[str, float],
+    hero_program: str,
+) -> str | None:
+    """Подпись про запасную программу, если основная забирает мало прогонов."""
+    others = [
+        (program, share)
+        for program, share in by_program.items()
+        if program != hero_program and share >= 0.005
+    ]
+    if not others:
+        return None
+    program, share = max(others, key=lambda item: item[1])
+    return (
+        f"остальные прогоны ≈ {share:.0%} на {short_program_label(program)}"
+    )
+
+
+def focus_program_shares_by_scenario(
+    applicants: dict[int, ApplicantProfile],
+    seats: dict[str, int | None],
+    my_code: int,
+    *,
+    focus_program: str,
+    n_simulations: int,
+    seed: int = 42,
+    n_workers: int | None = None,
+    current_scenario: ConsentScenario | None = None,
+    current_share: float | None = None,
+    current_focus_program: str | None = None,
+) -> dict[ConsentScenario, float]:
+    """Доля прогонов на focus_program для каждого сценария согласий."""
+    workers = n_workers if n_workers is not None else min(4, os.cpu_count() or 1)
+    shares: dict[ConsentScenario, float] = {}
+    for scenario in SCENARIO_LABELS:
+        if (
+            current_scenario == scenario
+            and current_share is not None
+            and (
+                current_focus_program is None
+                or current_focus_program == focus_program
+            )
+        ):
+            shares[scenario] = current_share
+            continue
+        estimate = estimate_probability(
+            applicants,
+            seats,
+            my_code,
+            n_simulations=n_simulations,
+            scenario=scenario,
+            seed=seed,
+            n_workers=workers,
+            focus_program=focus_program,
+        )
+        shares[scenario] = estimate.by_program.get(focus_program, 0.0)
+    return shares
+
+
+def build_focus_hero_data(
+    dataset: Dataset,
+    my_code: int,
+    probability: ProbabilityEstimate,
+    *,
+    scenario_shares: dict[ConsentScenario, float],
+    active_scenario: ConsentScenario,
+    manual_consent: bool,
+) -> FocusHeroData | None:
+    """Собирает поля hero-блока из результата анализа."""
+    my_programs = my_program_names(dataset, my_code)
+    program = resolve_hero_program(my_programs, probability)
+    if program is None:
+        return None
+    app = dataset.applicants[my_code].application_for(program)
+    if app is None:
+        return None
+    return FocusHeroData(
+        program=program,
+        title=f"Шанс на {short_program_label(program).lower()}",
+        my_code=my_code,
+        priority=app.priority,
+        rank=app.rank,
+        score=app.score,
+        seats_label=format_seats(dataset.seats.get(program)),
+        n_simulations=probability.n_simulations,
+        any_loaded=probability.any_loaded,
+        backup_note=backup_program_note(probability.by_program, program),
+        scenario_shares=scenario_shares,
+        active_scenario=active_scenario,
+        manual_consent=manual_consent,
+    )
+
+
+def focus_hero_html(data: FocusHeroData) -> str:
+    """HTML hero-блока фокусной программы."""
+    meta_parts = [
+        f"код {data.my_code}",
+        f"приоритет {data.priority}",
+        f"место {data.rank}",
+        f"баллы {data.score:g}",
+        f"мест {data.seats_label}",
+        f"прогонов {data.n_simulations}",
+    ]
+    if data.backup_note:
+        meta_parts.append(data.backup_note)
+    meta = " · ".join(html.escape(part) for part in meta_parts)
+
+    any_loaded = html.escape(f"{data.any_loaded:.1%}")
+    warning_body = html.escape(FOCUS_HERO_WARNING_BODY)
+    if data.manual_consent:
+        warning_body = html.escape(
+            "Задана одна вероятность согласия вручную — сравнение сценариев ниже "
+            "не пересчитывается отдельно."
+        )
+
+    metrics: list[str] = []
+    for scenario in SCENARIO_LABELS:
+        share = data.scenario_shares.get(scenario, 0.0)
+        active = " focus-hero__metric--active" if scenario == data.active_scenario else ""
+        color = SCENARIO_HERO_COLORS[scenario]
+        label = html.escape(SCENARIO_HERO_LABELS[scenario])
+        metrics.append(
+            f'<div class="focus-hero__metric{active}">'
+            f'<div class="focus-hero__metric-value" style="color:{color}">'
+            f"{share:.1%}</div>"
+            f'<div class="focus-hero__metric-label">{label}</div>'
+            "</div>"
+        )
+
+    return (
+        f'<div class="focus-hero">'
+        f'<h2 class="focus-hero__title">{html.escape(data.title)}</h2>'
+        f'<p class="focus-hero__meta">{meta}</p>'
+        f'<div class="focus-hero__callout">'
+        f'<div class="focus-hero__callout-title">'
+        f"{html.escape(FOCUS_HERO_WARNING_TITLE)} "
+        f"(сейчас «любая загруженная» = {any_loaded})</div>"
+        f"<div>{warning_body}</div>"
+        f"</div>"
+        f'<div class="focus-hero__metrics">{"".join(metrics)}</div>'
+        f"</div>"
+    )
+
+
+def has_consent_bands(model: ConsentModel | None) -> bool:
+    """Есть ли что показать в таблице третей."""
+    return model is not None and any(band.n for band in model.bands)
+
+
 def _append_fill_block(lines: list[str], stats: ProgramFillStats) -> None:
     cutoff = format_cutoff(stats.cutoff)
     lines.extend(
@@ -491,7 +810,16 @@ def _append_fill_block(lines: list[str], stats: ProgramFillStats) -> None:
 
 
 _NUMERIC_TABLE_KEYS = frozenset(
-    {"Код", "Их место", "Ваше место", "Разрыв", "Зачислено сейчас"}
+    {
+        "Код",
+        "Их место",
+        "Ваше место",
+        "Разрыв",
+        "Зачислено сейчас",
+        "Людей",
+        "Уже с согласием",
+        "Без согласия",
+    }
 )
 
 
@@ -519,6 +847,7 @@ def build_markdown_report(
     counterfactuals: list[Counterfactual],
     probability: ProbabilityEstimate | None,
     include_pending: bool,
+    consent_model: ConsentModel | None = None,
 ) -> str:
     """Собирает полный Markdown-отчёт."""
     me = dataset.applicants[my_code]
@@ -586,6 +915,19 @@ def build_markdown_report(
             "",
         ]
     )
+
+    if has_consent_bands(consent_model):
+        assert consent_model is not None
+        lines.extend(
+            [
+                "### Согласия по месту в списке",
+                "",
+                CONSENT_BANDS_CAPTION,
+                "",
+            ]
+        )
+        lines.extend(_markdown_from_rows(consent_band_rows(consent_model.bands)))
+        lines.extend(["", f"> {consent_model.description}", ""])
 
     if probability is not None:
         lines.extend(
@@ -740,6 +1082,7 @@ def print_cli_report(
     probability: ProbabilityEstimate | None,
     include_pending: bool,
     console: Console | None = None,
+    consent_model: ConsentModel | None = None,
 ) -> None:
     """Печатает три экрана отчёта в терминал."""
     console = console or Console()
@@ -813,6 +1156,28 @@ def print_cli_report(
         "[dim]Сейчас — зачисление только среди уже подавших согласие. "
         "«Если согласие подадут все» — крайний случай полной конкуренции.[/dim]"
     )
+
+    if has_consent_bands(consent_model):
+        assert consent_model is not None
+        bands_table = Table(
+            show_header=True,
+            header_style="bold",
+            title="Согласия по месту в списке",
+        )
+        bands_table.add_column("Треть списка")
+        bands_table.add_column("Людей", justify="right")
+        bands_table.add_column("Уже с согласием", justify="right")
+        bands_table.add_column("Без согласия", justify="right")
+        for row in consent_band_rows(consent_model.bands):
+            bands_table.add_row(
+                str(row["Треть списка"]),
+                str(row["Людей"]),
+                str(row["Уже с согласием"]),
+                str(row["Без согласия"]),
+            )
+        console.print(bands_table)
+        console.print(f"[dim]{CONSENT_BANDS_CAPTION}[/dim]")
+        console.print(f"[dim]{consent_model.description}[/dim]")
 
     if probability is not None:
         prob = Table(

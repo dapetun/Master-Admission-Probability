@@ -77,7 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "balanced", "optimistic", "pessimistic"],
         default="auto",
         help=(
-            "Сценарий согласий прочих (по умолчанию auto = доли из списков, не 100%%). "
+            "Сценарий согласий прочих (по умолчанию auto = доли из списков "
+            "по трети места у конкурентов, не 100%%). "
             "«Согласие подадут все» — отдельный крайний случай, не случайные прогоны"
         ),
     )
@@ -256,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         probability=result.probability,
         include_pending=result.include_pending,
         console=Console(),
+        consent_model=result.consent_model,
     )
 
     if not args.no_report_file:
@@ -268,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
             counterfactuals=result.counterfactuals,
             probability=result.probability,
             include_pending=result.include_pending,
+            consent_model=result.consent_model,
         )
         write_markdown_report(args.report, md)
         console.print(f"[green]Отчёт сохранён:[/green] {args.report.resolve()}")

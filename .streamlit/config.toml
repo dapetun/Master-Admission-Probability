@@ -1,0 +1,33 @@
+[theme]
+base = "light"
+primaryColor = "#7A9BB8"
+backgroundColor = "#F5F7F9"
+secondaryBackgroundColor = "#EEF1F4"
+textColor = "#454340"
+font = "sans-serif"
+borderColor = "#D8DEE4"
+
+blueColor = "#7A9BB8"
+blueBackgroundColor = "#EDF2F6"
+blueTextColor = "#4A6278"
+
+yellowColor = "#6E8A9A"
+yellowBackgroundColor = "#EEF2F6"
+yellowTextColor = "#5A6570"
+
+redColor = "#A67B7B"
+redBackgroundColor = "#F5EDED"
+redTextColor = "#7A5555"
+
+greenColor = "#6B9080"
+greenBackgroundColor = "#EDF3EF"
+greenTextColor = "#4A6B5C"
+
+grayColor = "#7B8494"
+
+chartCategoricalColors = ["#8BA4BE", "#6B9080", "#6E8A9A", "#A67B7B", "#7B8494", "#9BB5C8", "#8FA89A"]
+
+[theme.sidebar]
+backgroundColor = "#EEF1F4"
+secondaryBackgroundColor = "#F5F7F9"
+borderColor = "#D8DEE4"

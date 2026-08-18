@@ -301,6 +301,132 @@ def test_auto_does_not_copy_all_consent_onto_undecided() -> None:
         assert pes.by_code[code] >= auto.by_code[code]
 
 
+def test_auto_higher_p_for_stronger_competitive() -> None:
+    """Верх списка среди конкурентов ОВП — выше P, чем низ."""
+    from admission_sim.scenarios import MIN_CONSENT_BAND_N, estimate_consent_model
+
+    rows: list[ApplicationRow] = []
+    for rank in range(1, 61):
+        if rank <= 20:
+            consent = rank <= 16
+        elif rank <= 40:
+            consent = rank <= 28
+        else:
+            consent = rank <= 42
+        rows.append(
+            _row(rank, "A", 1, 160 - rank, rank, consent=consent)
+        )
+    profiles = build_profiles(rows)
+    seats = {"A": 60}
+    auto = estimate_consent_model(profiles, seats, scenario="auto")
+    bal = estimate_consent_model(profiles, seats, scenario="balanced")
+    pes = estimate_consent_model(profiles, seats, scenario="pessimistic")
+    opt = estimate_consent_model(profiles, seats, scenario="optimistic")
+
+    assert len(auto.bands) == 3
+    assert all(band.n >= MIN_CONSENT_BAND_N for band in auto.bands)
+    assert auto.bands[0].rate > auto.bands[2].rate
+    top_undecided = 20
+    bottom_undecided = 60
+    assert auto.by_code[top_undecided] > auto.by_code[bottom_undecided]
+    assert auto.by_code[top_undecided] == auto.bands[0].rate
+    assert auto.by_code[bottom_undecided] == auto.bands[2].rate
+    assert bal.by_code[top_undecided] == bal.by_code[bottom_undecided]
+    assert pes.by_code[top_undecided] > auto.by_code[top_undecided]
+    assert pes.by_code[top_undecided] < 1.0
+    assert opt.by_code[top_undecided] < auto.by_code[top_undecided]
+
+
+def test_auto_band_fallback_when_tertile_small() -> None:
+    """Маленькие трети не дробят p: оба неопределившихся конкурента равны."""
+    from admission_sim.scenarios import MIN_CONSENT_BAND_N, estimate_consent_model
+
+    rows = [
+        _row(1, "A", 1, 100, 1, consent=True),
+        _row(2, "A", 1, 90, 2, consent=False),
+        _row(3, "A", 1, 80, 3, consent=True),
+        _row(4, "A", 1, 70, 4, consent=False),
+        _row(5, "A", 1, 60, 5, consent=True),
+        _row(6, "A", 1, 50, 6, consent=False),
+    ]
+    auto = estimate_consent_model(build_profiles(rows), {"A": 6})
+    assert all(band.n < MIN_CONSENT_BAND_N for band in auto.bands)
+    assert auto.by_code[2] == auto.by_code[6]
+    assert auto.by_code[2] == auto.competitive_rate == 0.5
+
+
+def test_consent_bands_in_markdown_report() -> None:
+    from admission_sim.model import Dataset
+    from admission_sim.report import CONSENT_BANDS_CAPTION, build_markdown_report
+    from admission_sim.scenarios import estimate_consent_model
+
+    rows = [
+        _row(1, "A", 1, 100, 1, consent=False),
+        _row(2, "A", 1, 90, 2, consent=True),
+    ]
+    profiles = build_profiles(rows)
+    seats = {"A": 2}
+    dataset = Dataset(
+        applicants=profiles,
+        seats=seats,
+        programs=["A"],
+        source_files=["a.xlsx"],
+        incomplete_priority_codes=[],
+    )
+    vpp = simulate_enrollment(profiles, seats, consent_only=True)
+    model = estimate_consent_model(profiles, seats)
+    md = build_markdown_report(
+        dataset,
+        1,
+        vpp=vpp,
+        vpp_if_consent=what_if_consent(profiles, seats, 1),
+        ovp=simulate_enrollment(profiles, seats, consent_only=False),
+        counterfactuals=[],
+        probability=None,
+        include_pending=True,
+        consent_model=model,
+    )
+    assert "### Согласия по месту в списке" in md
+    assert CONSENT_BANDS_CAPTION in md
+    assert "верх списка" in md
+
+
+def test_consent_band_chart_rows_use_percent() -> None:
+    from admission_sim.report import consent_band_chart_rows
+    from admission_sim.scenarios import ConsentBand
+
+    bands = (
+        ConsentBand("верх списка", 790, 541, 0.685, 249),
+        ConsentBand("середина", 790, 424, 0.537, 366),
+        ConsentBand("низ списка", 789, 389, 0.493, 400),
+    )
+    rows = consent_band_chart_rows(bands)
+    assert [row["Треть списка"] for row in rows] == [
+        "верх списка",
+        "середина",
+        "низ списка",
+    ]
+    assert rows[0]["Уже с согласием, %"] == 68.5
+
+
+def test_probability_chart_rows_keep_program_order() -> None:
+    from admission_sim.report import probability_chart_rows, short_program_label
+
+    rows = probability_chart_rows(
+        {
+            "Прикладные модели искусственного интеллекта (Москва)": 0.062,
+            "Финансовые технологии (Нижний Новгород)": 0.912,
+        }
+    )
+    assert rows[0]["Программа"].startswith("Прикладные модели")
+    assert rows[0]["Доля прогонов, %"] == 6.2
+    assert rows[1]["Доля прогонов, %"] == 91.2
+    assert (
+        short_program_label("Прикладные модели искусственного интеллекта (Москва)")
+        == "Прикладные модели искусственного интеллекта"
+    )
+
+
 def test_load_seats_accepts_extended_entries(tmp_path: Path) -> None:
     from admission_sim.load import load_seats
 
@@ -1434,4 +1560,74 @@ def test_pessimistic_not_certain_with_pending_majority() -> None:
     assert pes.by_code[2] < 1.0
     for i in range(20):
         assert pes.by_code[20 + i] < 1.0
+
+
+def test_resolve_hero_program_prefers_focus() -> None:
+    from admission_sim.report import resolve_hero_program
+    from admission_sim.scenarios import ProbabilityEstimate
+
+    programs = ["A", "B"]
+    estimate = ProbabilityEstimate(
+        n_simulations=100,
+        by_program={"A": 0.1, "B": 0.8},
+        any_loaded=0.9,
+        external=0.05,
+        none=0.05,
+        mean_consent_probability=0.3,
+        consent_model_description="test",
+        scenario="auto",
+        focus_program="B",
+    )
+    assert resolve_hero_program(programs, estimate) == "B"
+    assert resolve_hero_program(programs, None) == "A"
+
+
+def test_backup_program_note_picks_largest_other_share() -> None:
+    from admission_sim.report import backup_program_note
+
+    note = backup_program_note(
+        {
+            "Прикладные модели (Москва)": 0.062,
+            "Финтех (НН)": 0.912,
+        },
+        "Прикладные модели (Москва)",
+    )
+    assert note is not None
+    assert "91%" in note
+    assert "Финтех" in note
+
+
+def test_focus_hero_html_contains_warning_and_metrics() -> None:
+    from admission_sim.report import (
+        FOCUS_HERO_WARNING_TITLE,
+        FocusHeroData,
+        focus_hero_html,
+    )
+
+    html_block = focus_hero_html(
+        FocusHeroData(
+            program="Прикладные модели (Москва)",
+            title="Шанс на прикладные модели",
+            my_code=123,
+            priority=1,
+            rank=42,
+            score=287,
+            seats_label="25",
+            n_simulations=1000,
+            any_loaded=0.974,
+            backup_note="остальные прогоны ≈ 91% на Финтех",
+            scenario_shares={
+                "auto": 0.062,
+                "balanced": 0.055,
+                "optimistic": 0.081,
+                "pessimistic": 0.041,
+            },
+            active_scenario="auto",
+            manual_consent=False,
+        )
+    )
+    assert FOCUS_HERO_WARNING_TITLE in html_block
+    assert "6.2%" in html_block
+    assert "focus-hero__metric--active" in html_block
+    assert "Финтех" in html_block
 
