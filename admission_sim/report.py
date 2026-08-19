@@ -12,6 +12,7 @@ from rich.table import Table
 
 from admission_sim.load import is_pending_status
 from admission_sim.model import EXTERNAL, ApplicantProfile, Dataset
+from admission_sim.path_safety import ensure_not_overwriting, resolve_safe_path
 from admission_sim.scenarios import (
     CONSENT_BAND_LABELS,
     SCENARIO_LABELS,
@@ -47,6 +48,22 @@ class ProgramFillStats:
     priority1_ahead: int
     enrolled_ahead: int
     enrolled_below: int
+
+
+@dataclass(frozen=True, slots=True)
+class FocusCompetitorRow:
+    """Срез по одному абитуриенту на выбранной программе."""
+
+    code: int
+    rank: int
+    relative_to_me: int
+    score: float
+    consent: bool
+    status: str
+    priority_on_focus: int
+    vpp_destination: str | None
+    ovp_destination: str | None
+    above_me: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,11 +154,12 @@ THREATS_ALL_LEAVE_MESSAGE = (
 THREATS_SELECT_PROGRAM_CAPTION = "выберите программу"
 
 FOCUS_HERO_WARNING_TITLE = (
-    "Не путать 100% «куда-нибудь» с шансом на приоритет 1"
+    "Два разных шанса"
 )
 FOCUS_HERO_WARNING_BODY = (
-    "«Любая загруженная» — сумма по всем вашим программам в одном прогоне. "
-    "Цифры ниже — доля прогонов с зачислением именно на выбранную программу."
+    "«Хоть куда-то из загруженных» — шанс, что в одном прогоне вы поступите "
+    "хотя бы на одну из своих программ.\n\n"
+    "Цифры ниже — шанс поступить именно на эту выбранную программу."
 )
 SCENARIO_HERO_LABELS: dict[ConsentScenario, str] = {
     "auto": "Авто",
@@ -158,6 +176,9 @@ SCENARIO_HERO_COLORS: dict[ConsentScenario, str] = {
 
 CHART_BAR_COLOR = "#8BA4BE"
 CHART_LABEL_COLOR = "#454340"
+EXTERNAL_FALLBACK_LABEL = (
+    "Не зачислен в загруженные программы (или данные неполные)"
+)
 
 
 def filter_counterfactuals_by_overlap(
@@ -194,7 +215,7 @@ def _fmt_dest(dest: str | None) -> str:
     if dest is None:
         return "не зачислен"
     if dest == EXTERNAL:
-        return "вне загруженных программ"
+        return EXTERNAL_FALLBACK_LABEL
     return dest
 
 
@@ -380,6 +401,75 @@ def seat_fill_rows(stats_list: list[ProgramFillStats]) -> list[dict[str, object]
     return rows
 
 
+def focus_competitor_rows(
+    dataset: Dataset,
+    my_code: int,
+    focus_program: str,
+    *,
+    vpp: EnrollmentResult,
+    ovp: EnrollmentResult,
+) -> list[FocusCompetitorRow]:
+    """Возвращает абитуриентов на программе с признаком «выше меня»."""
+    me = dataset.applicants[my_code]
+    my_app = me.application_for(focus_program)
+    if my_app is None:
+        return []
+
+    my_rank = my_app.rank
+    rows: list[FocusCompetitorRow] = []
+    for code, profile in dataset.applicants.items():
+        if code == my_code:
+            continue
+        app = profile.application_for(focus_program)
+        if app is None:
+            continue
+        rows.append(
+            FocusCompetitorRow(
+                code=code,
+                rank=app.rank,
+                relative_to_me=my_rank - app.rank,
+                score=app.score,
+                consent=profile.consent,
+                status=app.status,
+                priority_on_focus=app.priority,
+                vpp_destination=vpp.destination(code),
+                ovp_destination=ovp.destination(code),
+                above_me=app.rank < my_rank,
+            )
+        )
+    rows.sort(key=lambda row: (row.rank, -row.score, row.code))
+    return rows
+
+
+def focus_competitor_table_rows(
+    rows: list[FocusCompetitorRow],
+) -> list[dict[str, object]]:
+    """Преобразует конкурентный срез в строки для таблицы Streamlit."""
+    table: list[dict[str, object]] = []
+    for row in rows:
+        if row.relative_to_me > 0:
+            relative = f"выше на {row.relative_to_me}"
+        elif row.relative_to_me < 0:
+            relative = f"ниже на {abs(row.relative_to_me)}"
+        else:
+            relative = "одно место"
+        table.append(
+            {
+                "Код": row.code,
+                "Позиция на программе": row.rank,
+                "Относительно меня": relative,
+                "Баллы": row.score,
+                "Согласие": "да" if row.consent else "нет",
+                "Статус": row.status,
+                "Приоритет на программе": row.priority_on_focus,
+                "Сейчас (ВПП)": _fmt_dest(row.vpp_destination),
+                "ОВП": _fmt_dest(row.ovp_destination),
+                "_above_me": row.above_me,
+            }
+        )
+    return table
+
+
 def vpp_user_enrolled(dest: str | None) -> bool:
     """True, если сейчас зачислены на загруженную программу (не EXTERNAL)."""
     return dest is not None and dest != EXTERNAL
@@ -548,7 +638,7 @@ def consent_band_chart(
     import pandas as pd
 
     rows = consent_band_chart_rows(bands)
-    chart_height = max(200, 58 * len(bands))
+    chart_height = max(240, 68 * len(bands))
     # Vega-Lite: первый элемент sort — внизу; нужен верх → середина → низ сверху вниз.
     y_sort = list(reversed(CONSENT_BAND_LABELS))
 
@@ -586,7 +676,7 @@ def consent_band_chart(
 
     return (
         (bars + labels)
-        .properties(width=440, height=chart_height)
+        .properties(width="container", height=chart_height)
         .configure_view(strokeWidth=0)
         .configure_axis(grid=False)
     )
@@ -845,14 +935,25 @@ def build_markdown_report(
     vpp_if_consent: EnrollmentResult,
     ovp: EnrollmentResult,
     counterfactuals: list[Counterfactual],
-    probability: ProbabilityEstimate | None,
+    probability: ProbabilityEstimate | dict[ConsentScenario, ProbabilityEstimate] | None,
     include_pending: bool,
-    consent_model: ConsentModel | None = None,
+    consent_model: ConsentModel | dict[ConsentScenario, ConsentModel] | None = None,
+    user_probability: ProbabilityEstimate | None = None,
 ) -> str:
     """Собирает полный Markdown-отчёт."""
     me = dataset.applicants[my_code]
     my_programs = my_program_names(dataset, my_code)
     my_set = set(my_programs)
+
+    consent_model_for_bands: ConsentModel | None
+    if isinstance(consent_model, dict):
+        # Диагностика “по месту” основана на эмпирике в списках,
+        # поэтому показываем по умолчанию авто (если есть).
+        consent_model_for_bands = consent_model.get("auto") or next(
+            iter(consent_model.values()), None
+        )
+    else:
+        consent_model_for_bands = consent_model
 
     lines: list[str] = [
         "# Отчёт симулятора поступления",
@@ -916,8 +1017,8 @@ def build_markdown_report(
         ]
     )
 
-    if has_consent_bands(consent_model):
-        assert consent_model is not None
+    if has_consent_bands(consent_model_for_bands):
+        assert consent_model_for_bands is not None
         lines.extend(
             [
                 "### Согласия по месту в списке",
@@ -926,37 +1027,41 @@ def build_markdown_report(
                 "",
             ]
         )
-        lines.extend(_markdown_from_rows(consent_band_rows(consent_model.bands)))
-        lines.extend(["", f"> {consent_model.description}", ""])
+        lines.extend(
+            _markdown_from_rows(consent_band_rows(consent_model_for_bands.bands))
+        )
+        lines.extend(["", f"> {consent_model_for_bands.description}", ""])
 
-    if probability is not None:
+    def _append_probability_block(
+        prob: ProbabilityEstimate,
+        *,
+        scenario_label_override: str | None = None,
+    ) -> None:
+        scenario_label = scenario_label_override or SCENARIO_LABELS.get(
+            prob.scenario, prob.scenario
+        )
         lines.extend(
             [
-                "### Случайные прогоны",
-                "",
-                "Много раз случайно решаем, кто из неопределившихся подаст согласие. "
-                "Это не крайний случай «согласие подадут все»: здесь не предполагается, "
-                "что согласятся все.",
-                "",
-                f"- Прогонов: {probability.n_simulations}",
-                f"- Сценарий согласий: **{SCENARIO_LABELS.get(probability.scenario, probability.scenario)}**",
-                f"- {probability.consent_model_description}",
+                f"- Прогонов: {prob.n_simulations}",
+                f"- Сценарий согласий: **{scenario_label}**",
+                f"- {prob.consent_model_description}",
                 f"- Средняя вероятность согласия у тех, кто ещё не согласился: "
-                f"{probability.mean_consent_probability:.0%} "
+                f"{prob.mean_consent_probability:.0%} "
                 "(не 100%: «согласие подадут все» — только крайний случай выше)",
-                f"- Шанс зачисления на загруженную программу = **{probability.any_loaded:.1%}**",
-                f"- {mc_ci95_note(probability)}",
+                f"- Шанс зачисления на загруженную программу = **{prob.any_loaded:.1%}**",
+                f"- {mc_ci95_note(prob)}",
                 f"- {MC_SCENARIO_UNCERTAINTY_NOTE}",
-                f"- Шанс ухода вне загруженных программ = {probability.external:.1%}",
-                f"- Шанс без зачисления = {probability.none:.1%}",
+                f"- Шанс не попасть в загруженные программы "
+                f"(или данные неполные) = {prob.external:.1%}",
+                f"- Шанс без зачисления = {prob.none:.1%}",
                 "",
             ]
         )
-        if probability.focus_program:
+        if prob.focus_program:
             lines.extend(
                 [
                     f"Случайные прогоны считались для программы "
-                    f"**{probability.focus_program}**. "
+                    f"**{prob.focus_program}**. "
                     "В расчёт входят и конкурсы с более высоким приоритетом, "
                     "куда могут уйти конкуренты.",
                     "",
@@ -973,9 +1078,55 @@ def build_markdown_report(
                 "|---|---:|",
             ]
         )
-        for program, value in probability.by_program.items():
+        for program, value in prob.by_program.items():
             lines.append(f"| {program} | {value:.1%} |")
         lines.append("")
+
+    if probability is not None:
+        if isinstance(probability, ProbabilityEstimate):
+            lines.extend(
+                [
+                    "### Случайные прогоны",
+                    "",
+                    "Много раз случайно решаем, кто из неопределившихся подаст согласие. "
+                    "Это не крайний случай «согласие подадут все»: здесь не предполагается, "
+                    "что согласятся все.",
+                    "",
+                ]
+            )
+            _append_probability_block(probability)
+        else:
+            lines.extend(
+                [
+                    "### Случайные прогоны",
+                    "",
+                    "Много раз случайно решаем, кто из неопределившихся подаст согласие. "
+                    "Это не крайний случай «согласие подадут все»: здесь не предполагается, "
+                    "что согласятся все.",
+                    "",
+                ]
+            )
+            for scenario in SCENARIO_LABELS:
+                prob = probability.get(scenario)
+                if prob is None:
+                    continue
+                lines.extend([f"#### {SCENARIO_LABELS.get(scenario, scenario)}", ""])
+                _append_probability_block(prob)
+
+    if user_probability is not None:
+        lines.extend(
+            [
+                "### Пользовательская вероятность согласия",
+                "",
+                "Если вы хотите прикинуть другую “общую вероятность согласия” "
+                "для тех, кто ещё не согласился, используйте этот сценарий только "
+                "для отчёта.",
+                "",
+            ]
+        )
+        _append_probability_block(
+            user_probability, scenario_label_override="Пользовательский"
+        )
 
     my_unknown = [p for p in my_programs if dataset.seats.get(p) is None]
     my_zero = [
@@ -1188,7 +1339,10 @@ def print_cli_report(
         prob.add_column("Исход")
         prob.add_column("Доля", justify="right")
         prob.add_row("Любая загруженная", f"{probability.any_loaded:.1%}")
-        prob.add_row("Вне загруженных", f"{probability.external:.1%}")
+        prob.add_row(
+            "Не зачислен в загруженные (или данные неполные)",
+            f"{probability.external:.1%}",
+        )
         prob.add_row("Не зачислен", f"{probability.none:.1%}")
         for program, value in probability.by_program.items():
             prob.add_row(program, f"{value:.1%}")
@@ -1271,7 +1425,15 @@ def print_cli_report(
         console.print(f"[dim]{threats_view.count_caption}[/dim]")
 
 
-def write_markdown_report(path: Path | str, content: str) -> None:
-    """Пишет Markdown-отчёт на диск."""
-    target = Path(path)
+def write_markdown_report(
+    path: Path | str,
+    content: str,
+    *,
+    allowed_roots: list[Path] | tuple[Path, ...] = (Path.cwd(),),
+    force: bool = False,
+) -> None:
+    """Пишет Markdown-отчёт на диск внутри allowlist-корней."""
+    target = resolve_safe_path(path, allowed_roots=allowed_roots)
+    ensure_not_overwriting(target, force=force)
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")

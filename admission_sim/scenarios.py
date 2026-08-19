@@ -571,7 +571,16 @@ def _mc_init(
 
 def _mc_chunk(start: int, count: int, seed: int) -> dict[str, int | dict[str, int]]:
     """Серия MC-прогонов для одного процесса."""
-    ctx = _MC_CTX
+    return _mc_chunk_with_ctx(_MC_CTX, start, count, seed)
+
+
+def _mc_chunk_with_ctx(
+    ctx: dict,
+    start: int,
+    count: int,
+    seed: int,
+) -> dict[str, int | dict[str, int]]:
+    """Серия MC-прогонов с переданным контекстом (без global race в serial)."""
     counts = {program: 0 for program in ctx["my_programs"]}
     external_count = 0
     none_count = 0
@@ -745,17 +754,17 @@ def estimate_probability(
             partials, my_programs
         )
     else:
-        _mc_init(
-            sim_applicants,
-            sim_seats,
-            applicant_code,
-            undecided,
-            probs,
-            mean_p,
-            my_programs,
-        )
+        local_ctx = {
+            "applicants": sim_applicants,
+            "seats": sim_seats,
+            "applicant_code": applicant_code,
+            "undecided": undecided,
+            "probs": probs,
+            "mean_p": mean_p,
+            "my_programs": my_programs,
+        }
         counts, external_count, none_count, any_count = _merge_mc_partials(
-            [_mc_chunk(0, n_simulations, seed)],
+            [_mc_chunk_with_ctx(local_ctx, 0, n_simulations, seed)],
             my_programs,
         )
 

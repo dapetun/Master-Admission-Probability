@@ -125,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Не писать report.md",
     )
     parser.add_argument(
+        "--force-report",
+        action="store_true",
+        help="Разрешить перезапись существующего отчёта",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Без интерактивных вопросов (нужен --me)",
@@ -239,7 +244,8 @@ def main(argv: list[str] | None = None) -> int:
         console.print(
             "[yellow]Нет числа бюджетных мест у ваших программ:[/yellow] "
             + ", ".join(my_unknown)
-            + " — модель считает уход вне загруженных программ."
+            + " — модель считает: не зачислен в загруженные программы "
+            + "(или данные неполные)."
         )
     elif other_unknown:
         console.print(
@@ -272,7 +278,12 @@ def main(argv: list[str] | None = None) -> int:
             include_pending=result.include_pending,
             consent_model=result.consent_model,
         )
-        write_markdown_report(args.report, md)
+        write_markdown_report(
+            args.report,
+            md,
+            allowed_roots=(Path.cwd(),),
+            force=args.force_report,
+        )
         console.print(f"[green]Отчёт сохранён:[/green] {args.report.resolve()}")
 
     return 0

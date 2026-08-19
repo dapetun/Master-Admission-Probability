@@ -14,6 +14,7 @@ from admission_sim.load import (
     program_and_campus_from_budget_xlsx,
     program_key,
 )
+from admission_sim.path_safety import ensure_not_overwriting, resolve_safe_path
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
@@ -39,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=OUT,
         help="Куда писать seats.yaml (по умолчанию ./seats.yaml)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Разрешить перезапись существующего файла",
     )
     args = parser.parse_args(argv)
 
@@ -66,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             seats = None
             notes = (
-                "число мест неизвестно — модель считает уход вне загруженных программ"
+                "число мест неизвестно — модель считает: не зачислен "
+                "в загруженные программы (или данные неполные)"
             )
 
         programs[key] = {
@@ -76,11 +83,16 @@ def main(argv: list[str] | None = None) -> int:
             "notes": notes,
         }
 
+    out_path = args.out if args.out.is_absolute() else (ROOT / args.out)
+    safe_out = resolve_safe_path(out_path, allowed_roots=(ROOT,))
+    ensure_not_overwriting(safe_out, force=args.force)
+
     payload = {"programs": programs}
     text = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
-    args.out.write_text(text, encoding="utf-8")
+    safe_out.parent.mkdir(parents=True, exist_ok=True)
+    safe_out.write_text(text, encoding="utf-8")
 
-    loaded = load_seats(args.out)
+    loaded = load_seats(safe_out)
     known = sum(1 for v in loaded.values() if v is not None)
     positive = sum(1 for v in loaded.values() if isinstance(v, int) and v > 0)
     unknown = sum(1 for v in loaded.values() if v is None)
@@ -88,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         f"программ: {len(loaded)}; с известным K: {known}; "
         f"K>0: {positive}; неизвестно: {unknown}"
     )
-    print(f"written {args.out}")
+    print(f"written {safe_out}")
     return 0
 
 
